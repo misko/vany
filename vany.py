@@ -4,18 +4,19 @@ import json
 import time
 import sqlite3
 from sqlite3 import Error
-from flask import Flask,render_template
+from flask import Flask,render_template,request,session
 import os
 import datetime
 import math
 import random
 from flask_socketio import SocketIO
-
+from bt_scanner import bluetooth_scan_to_list
 
 VERSION=1
 pubsub_channel='vany'
 
 app = Flask(__name__)
+app.secret_key = 'my super secret key'.encode('utf8')
 
 socketio = SocketIO(app)
 
@@ -32,7 +33,7 @@ def timestamp():
   return datetime.datetime.now()
 
 class Message:
-  def __init__(self,version,_from,_to,_type,data,_hash=None):
+  def __init__(self,version,_from,_to,_type,data,sid=-1,_hash=None):
     self.version=version
     self._from=_from
     self._to=_to
@@ -41,15 +42,20 @@ class Message:
     if _hash==None:
       _hash=get_hash()
     self._hash=_hash
+    self.sid=sid
+
+  def to_dict(self):
+    header,data=self.to_tuple()
+    return {'header':header,'data':data}
 
   def to_tuple(self):
     return ({'from':self._from,
           'to':self._to,
           'type':self._type,
           'hash':self._hash,
-          'version':self.version},self.data)
+          'version':self.version,
+          'sid':self.sid},self.data)
    
-
   def encode(self):
     return json.dumps(self.to_tuple())
     
@@ -60,10 +66,14 @@ class Message:
         _to=header['to'],
         _type=header['type'],
         _hash=header['hash'],
+        sid=header['sid'],
         data=data)
 
+  def make_response(self,data=None):
+      return Message(self.version,self._from,self._to,self._type+"_response",data=data,sid=self.sid,_hash=self._hash)
+
   def __repr__(self):
-    return "V:%s, F:%s, T:%s, TY:%s , %s" % (self.version,self._from,self._to,self._type,self._hash)
+      return "V:%s, F:%s, T:%s, TY:%s SID:%s , %s" % (self.version,self._from,self._to,self._type,self.sid,self._hash)
 
 class Node:
   def __init__(self,name,wait=0.001):
@@ -78,11 +88,50 @@ class Node:
     self.message_handlers = {'hello':self.hello_handler}
 
   def hello_handler(self,m):
-    response=Message(version=VERSION,_from=self.name,_to="All",_type="hello_response",data={},_hash=m._hash)
+    response=m.make_response(data={})
     self.r.publish(pubsub_channel, response.encode()) 
 
   def run(self):
     self.running=False
+
+class BluetoothScanner(Node):
+  def __init__(self,name,simulate=False):
+    super().__init__(name)
+    self.simulate=simulate
+    self.message_handlers['btscan']=self.scan_handler
+
+  def scan_handler(self,m):
+    discovered_devices=bluetooth_scan_to_list(m.data['time'])
+    response=m.make_response(data={'discovered_devices':discovered_devices})
+    print("SCAN RESPONSE",response,response.data)
+    self.r.publish(pubsub_channel, response.encode()) 
+
+  def run(self):
+    print("RUNNING",self.name)
+    #make sure the db is setup
+    self.sqlite = sqlite3.connect(db_folder+"/"+self.name+".db")
+    self.sqlite.cursor().execute("""CREATE TABLE IF NOT EXISTS devices (
+                                    ts timestamp NOT NULL,
+                                    addr str NOT NULL,
+                                    name str 
+                                );""")
+    self.sqlite.commit()
+    
+    #join the pubsub to respond to events
+    self.p.subscribe(pubsub_channel)
+
+    last_simulate=None
+    while self.should_run:
+      m=self.p.get_message()
+      while m:
+        if m['type']=='message':
+          m=Message.decode(m['data'])
+          if m._type in self.message_handlers:
+            self.message_handlers[m._type](m)
+        m=self.p.get_message()
+      #lets check for a new voltage
+      time.sleep(self.wait)
+    print("Bluetooth scanner exiting")
 
 
 class TeslaBattery(Node):
@@ -162,22 +211,34 @@ class WebServer(Node):
       while m:
         if m['type']=='message':
           m=Message.decode(m['data'])
+          print(m)
           if m._type in self.message_handlers:
             self.message_handlers[m._type](m)
           #pass on hello response to all clients
           if m._type=='hello_response':
             socketio.emit('hello_response',m.to_tuple())
+          if m._type=='btscan_response':
+            print("ROOM",m.sid)
+            socketio.emit('btscan_response',m.to_dict(),room=m.sid)
         m=self.p.get_message()
       #check for requests from web
       while not self.requests_q.empty(): 
-        request=self.requests_q.get(block=False)     
-        if request['type']=='hello':
-          request=Message(version=VERSION,_from=self.name,_to="All",_type="hello",data={})
-          self.r.publish(pubsub_channel, request.encode()) 
+        client_request=self.requests_q.get(block=False)     
+        if client_request['to']=='hello':
+          vany_request=Message(version=VERSION,_from=self.name,_to="All",_type="hello",data={})
+          self.r.publish(pubsub_channel, vany_request.encode()) 
+        elif client_request['to']=='BluetoothScanner':
+          vany_request=Message(version=VERSION,_from=self.name,_to="All",_type="btscan",data=client_request['data'],sid=client_request['sid'])
+          self.r.publish(pubsub_channel, vany_request.encode()) 
       time.sleep(self.wait)
     print("Web server exiting") 
     self.running=False
 
+
+#@app.before_request
+#def do_something_whenever_a_request_comes_in():
+#    if 'sid' not in session:
+#        session['sid']=get_hash()
 
 @app.route('/dash')
 def dash():
@@ -187,6 +248,11 @@ def hello_world():
     ws.send_request({'type':'hello'})
     return 'Hello, World!'
 
+@app.route('/btscan')
+def http_btscan():
+    ws.send_request({'type':'btscan','sid':sid,'data':{'time':3}})
+    return 'Hello, World btscan!'
+
 @app.route('/blocking_voltage')
 def blocking_voltage():
     m=Message(version=VERSION,_from="WebClient",_to="WebServer",_type="Query",data={'TeslaBattery',})
@@ -194,6 +260,11 @@ def blocking_voltage():
 @socketio.on('message')
 def handle_message(data):
     print('received message: ' + data)
+
+
+@socketio.on('join')
+def on_join(data):
+    print("SOMEONE JOINED")
 
 @socketio.on('json')
 def handle_json(json):
@@ -203,21 +274,23 @@ def handle_json(json):
 def handle_my_custom_event(json):
     print('custom event received json: ' + str(json))
 
-@socketio.on('query')
+@socketio.on('vany_request')
 def handle_query(json):
-    print('handle query event: ' + str(json))
-    print("QUERY")
-    socketio.emit('query_response', {'voltage':4.12})
+    print("GOT SOCKET REQUEST")
+    json['sid']=request.sid
+    ws.send_request(json)
+    #socketio.emit('query_response', {'voltage':4.12})
 
 if __name__=='__main__':
   print("Welcome to vany!")
   #try to make some nodes
   ws=WebServer(name="FlaskWebserver")
   ts=TeslaBattery(name="TeslaBattery",simulate=True)
+  bt=BluetoothScanner(name="BluetoothScanner")
   #test message encode and decocde
   m=Message(version=VERSION,_from="Battery",_to="All",_type="Voltage",data=3.0)
   m_str=m.encode()
   m=Message.decode(m_str)
-  socketio.run(app)
+  socketio.run(app,host = '0.0.0.0')
   #app.run()
 
