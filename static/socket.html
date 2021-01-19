@@ -6,14 +6,17 @@
     var socket = io();
     socket.on('connect', function() {
         socket.emit('my event', {data: 'I\'m connected!'});
-	socket.emit('vany_request', {to: 'TeslaBattery'});
-	    socket.emit('vany_request', {to: 'BluetoothScanner',data:{time:3}});
+	socket.emit('vany_request', {to: 'TeslaBattery', type:'getvoltage'});
+	socket.emit('vany_request', {to: 'BluetoothScanner',type:'btscan',data:{time:3}});
     });
     socket.on('hello_response', function(data) {
         console.log("Device responding to hello",data);
     });
     socket.on('btscan_response', function(data) {
         console.log("Device responding to btscan",data);
+    });
+    socket.on('getvoltage_response', function(data) {
+        console.log("Device responding to getvoltage",data);
     });
 </script>
 </body>

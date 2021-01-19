@@ -103,13 +103,12 @@ class BluetoothScanner(Node):
   def scan_handler(self,m):
     discovered_devices=bluetooth_scan_to_list(m.data['time'])
     response=m.make_response(data={'discovered_devices':discovered_devices})
-    print("SCAN RESPONSE",response,response.data)
     self.r.publish(pubsub_channel, response.encode()) 
 
   def run(self):
     print("RUNNING",self.name)
     #make sure the db is setup
-    self.sqlite = sqlite3.connect(db_folder+"/"+self.name+".db")
+    self.sqlite = sqlite3.connect(db_folder+"/"+self.name+".db",detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     self.sqlite.cursor().execute("""CREATE TABLE IF NOT EXISTS devices (
                                     ts timestamp NOT NULL,
                                     addr str NOT NULL,
@@ -138,6 +137,7 @@ class TeslaBattery(Node):
   def __init__(self,name,simulate=False):
     super().__init__(name)
     self.simulate=simulate
+    self.message_handlers['getvoltage']=self.getvoltage_handler
     #id integer PRIMARY KEY,
 
   def add_voltage(self,voltage):
@@ -156,10 +156,19 @@ class TeslaBattery(Node):
     self.sqlite.cursor().execute(sqlite_insert_with_param, data_tuple) 
     self.sqlite.commit()
 
+  def getvoltage_handler(self,m):
+    sqlite_select_query='SELECT * FROM voltage ORDER BY ts DESC LIMIT 1;'
+    cursor=self.sqlite.cursor()
+    cursor.execute(sqlite_select_query)
+    records=cursor.fetchall()
+    ####
+    response=m.make_response(data={'voltage':(records[0][0].timestamp(),records[0][1])})
+    self.r.publish(pubsub_channel, response.encode()) 
+
   def run(self):
     print("RUNNING",self.name)
     #make sure the db is setup
-    self.sqlite = sqlite3.connect(db_folder+"/"+self.name+".db")
+    self.sqlite = sqlite3.connect(db_folder+"/"+self.name+".db",detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
     self.sqlite.cursor().execute("""CREATE TABLE IF NOT EXISTS voltage (
                                     ts timestamp NOT NULL,
                                     volts real NOT NULL 
@@ -214,22 +223,17 @@ class WebServer(Node):
           print(m)
           if m._type in self.message_handlers:
             self.message_handlers[m._type](m)
-          #pass on hello response to all clients
-          if m._type=='hello_response':
-            socketio.emit('hello_response',m.to_tuple())
-          if m._type=='btscan_response':
-            print("ROOM",m.sid)
-            socketio.emit('btscan_response',m.to_dict(),room=m.sid)
+          if '_response' in m._type:
+            socketio.emit(m._type,m.to_dict(),room=m.sid)
         m=self.p.get_message()
       #check for requests from web
       while not self.requests_q.empty(): 
         client_request=self.requests_q.get(block=False)     
-        if client_request['to']=='hello':
-          vany_request=Message(version=VERSION,_from=self.name,_to="All",_type="hello",data={})
-          self.r.publish(pubsub_channel, vany_request.encode()) 
-        elif client_request['to']=='BluetoothScanner':
-          vany_request=Message(version=VERSION,_from=self.name,_to="All",_type="btscan",data=client_request['data'],sid=client_request['sid'])
-          self.r.publish(pubsub_channel, vany_request.encode()) 
+        if 'data' not in client_request:
+            client_request['data']=None
+        vany_request=Message(version=VERSION,_from=self.name,_to="All",_type=client_request['type'],data=client_request['data'],sid=client_request['sid'])
+        print("VANY REQUST",vany_request)
+        self.r.publish(pubsub_channel, vany_request.encode()) 
       time.sleep(self.wait)
     print("Web server exiting") 
     self.running=False
