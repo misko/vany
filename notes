@@ -1,0 +1,1 @@
+sudo setcap 'cap_net_raw,cap_net_admin+eip' /home/pi/.virtualenvs/vany/lib/python3.7/site-packages/bluepy/bluepy-helper
