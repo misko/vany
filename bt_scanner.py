@@ -29,3 +29,6 @@ def bluetooth_scan_to_list(time):
                 'name':name})
     return found
 
+if __name__=='__main__':
+    for dev in bluetooth_scan_to_list(3):
+        print(dev)

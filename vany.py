@@ -99,20 +99,54 @@ class BluetoothScanner(Node):
     super().__init__(name)
     self.simulate=simulate
     self.message_handlers['btscan']=self.scan_handler
+    self.message_handlers['lastseen']=self.lastseen_handler
 
   def scan_handler(self,m):
     discovered_devices=bluetooth_scan_to_list(m.data['time'])
+    self.last_seen(discovered_devices)
     response=m.make_response(data={'discovered_devices':discovered_devices})
     self.r.publish(pubsub_channel, response.encode()) 
+
+  def lastseen_handler(self,m):
+    sqlite_select_query='SELECT * FROM last_seen;'
+    cursor=self.sqlite.cursor()
+    cursor.execute(sqlite_select_query)
+    records=cursor.fetchall()
+    response=m.make_response(data={'last_seen':[ (x[0],x[1].timestamp(),x[2]) for x in records]})
+    self.r.publish(pubsub_channel, response.encode()) 
+
+  def addr_to_name(self,addr):
+    sqlite_select_query='SELECT * FROM last_seen WHERE addr=?;'
+    cursor=self.sqlite.cursor()
+    cursor.execute(sqlite_select_query, (addr,)) 
+    records=cursor.fetchall()
+    if len(records)==0:
+        return None
+    return records[0][2]
+
+  def last_seen(self,devices):
+    sqlite_insert_with_param = """REPLACE INTO 'last_seen'
+  		  ('addr', 'ts', 'name') 
+  		  VALUES (?, ?, ?);"""
+    for device in devices:
+        if device['name']==None:
+            device['name']=self.addr_to_name(device['addr'])
+        data_tuple = (device['addr'],timestamp(),device['name'])
+        self.sqlite.cursor().execute(sqlite_insert_with_param, data_tuple) 
+    self.sqlite.commit()
 
   def run(self):
     print("RUNNING",self.name)
     #make sure the db is setup
     self.sqlite = sqlite3.connect(db_folder+"/"+self.name+".db",detect_types=sqlite3.PARSE_DECLTYPES | sqlite3.PARSE_COLNAMES)
-    self.sqlite.cursor().execute("""CREATE TABLE IF NOT EXISTS devices (
+    self.sqlite.cursor().execute("""CREATE TABLE IF NOT EXISTS last_seen (
+                                    addr str PRIMARY KEY,
                                     ts timestamp NOT NULL,
-                                    addr str NOT NULL,
                                     name str 
+                                );""")
+    self.sqlite.cursor().execute("""CREATE TABLE IF NOT EXISTS devices (
+                                    addr str PRIMARY KEY,
+                                    assigned_name str 
                                 );""")
     self.sqlite.commit()
     
